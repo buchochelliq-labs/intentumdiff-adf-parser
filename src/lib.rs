@@ -162,6 +162,100 @@ fn parse_variable(id: &str, name: &str, def: &Value) -> SemanticNode {
     leaf(id, "variable", &label)
 }
 
+// Borrow raw JSON values so each semantic node keeps the span of its exact
+// structural occurrence, even when labels repeat or keys contain escapes.
+fn raw_at<'a>(
+    mut raw: &'a serde_json::value::RawValue,
+    path: &[String],
+) -> Option<&'a serde_json::value::RawValue> {
+    for part in path {
+        raw = if raw.get().starts_with('[') {
+            let values: Vec<&'a serde_json::value::RawValue> =
+                serde_json::from_str(raw.get()).ok()?;
+            *values.get(part.parse::<usize>().ok()?)?
+        } else {
+            let values: std::collections::BTreeMap<String, &'a serde_json::value::RawValue> =
+                serde_json::from_str(raw.get()).ok()?;
+            *values.get(part)?
+        };
+    }
+    Some(raw)
+}
+
+fn attach_positions(
+    node: &mut SemanticNode,
+    source: &str,
+    raw: &serde_json::value::RawValue,
+    value: &Value,
+) -> Result<(), &'static str> {
+    let parts: Vec<_> = node.id.split('.').collect();
+    let mut path = Vec::<String>::new();
+    if parts.len() > 1 {
+        path.push("properties".into());
+        let key = match parts[1] {
+            "act" => "activities",
+            "param" => "parameters",
+            "var" => "variables",
+            "ann" => "annotations",
+            _ => return Err("Unknown semantic source path"),
+        };
+        path.push(key.into());
+        let index = parts
+            .get(2)
+            .and_then(|s| s.parse::<usize>().ok())
+            .ok_or("Invalid semantic source index")?;
+        if matches!(key, "parameters" | "variables") {
+            let name = value["properties"][key]
+                .as_object()
+                .and_then(|m| m.keys().nth(index))
+                .ok_or("Missing semantic source key")?;
+            path.push(name.clone());
+        } else {
+            path.push(index.to_string());
+        }
+        if parts.len() > 3 {
+            path.push(
+                match parts[3] {
+                    "input" => "inputs",
+                    "output" => "outputs",
+                    "dep" => "dependsOn",
+                    _ => return Err("Unknown activity source path"),
+                }
+                .into(),
+            );
+            path.push(
+                parts
+                    .get(4)
+                    .ok_or("Missing activity source index")?
+                    .to_string(),
+            );
+        }
+    }
+    let selected = raw_at(raw, &path)
+        .ok_or("Missing semantic source span")?
+        .get();
+    let start = selected.as_ptr() as usize - source.as_ptr() as usize;
+    let end = start + selected.len();
+    let point = |offset: usize| {
+        let prefix = &source[..offset];
+        let line = prefix.bytes().filter(|&b| b == b'\n').count() as u32;
+        let col = prefix.rfind('\n').map_or(offset, |i| offset - i - 1) as u32;
+        (line, col)
+    };
+    let (start_line, start_col) = point(start);
+    let (end_line, end_col) = point(end);
+    node.position = intentumdiff_plugin_sdk::tree::Position {
+        start_line,
+        start_col,
+        end_line,
+        end_col,
+    };
+    for child in &mut node.children {
+        attach_positions(child, source, raw, value)?;
+    }
+    Ok(())
+}
+
 fn parse_adf(content: &str) -> String {
     let val: Value = match serde_json::from_str(content) {
         Ok(v) => v,
@@ -211,7 +305,7 @@ fn parse_adf(content: &str) -> String {
         }
     }
 
-    let root = parent_node(
+    let mut root = parent_node(
         "0",
         "pipeline",
         if pipeline_name.is_empty() {
@@ -222,6 +316,13 @@ fn parse_adf(content: &str) -> String {
         children,
     );
 
+    let raw = match serde_json::from_str::<&serde_json::value::RawValue>(content) {
+        Ok(raw) => raw,
+        Err(error) => return serde_json::json!({"error": error.to_string()}).to_string(),
+    };
+    if let Err(error) = attach_positions(&mut root, content, raw, &val) {
+        return serde_json::json!({"error": error}).to_string();
+    }
     match serde_json::to_string(&root) {
         Ok(s) => s,
         Err(e) => format!(r#"{{"error":"Serialisation error: {}"}}"#, e),
@@ -279,6 +380,18 @@ mod tests {
     use super::*;
     use crate::exports::intentdiff::plugin::parser::Guest;
     use intentumdiff_plugin_sdk::testing as t;
+
+    #[test]
+    fn source_ranges_distinguish_duplicate_names_and_parameter_values() {
+        let source = "{\n  \"name\": \"same\",\n  \"properties\": {\n    \"activities\": [\n      {\"name\": \"same\", \"type\": \"Copy\"},\n      {\"name\": \"same\", \"type\": \"WebActivity\"}\n    ],\n    \"parameters\": {\n      \"é/name\": {\"type\": \"string\"}\n    }\n  }\n}";
+        let tree: Value = serde_json::from_str(&parse_adf(source)).unwrap();
+        let children = tree["children"].as_array().unwrap();
+        assert_eq!(children[0]["position"]["start_line"], 4);
+        assert_eq!(children[1]["position"]["start_line"], 5);
+        assert_eq!(children[2]["position"]["start_line"], 8);
+        assert!(children[0]["position"]["end_col"].as_u64().unwrap() > 6);
+        assert_eq!(tree["position"]["end_line"], 11);
+    }
 
     #[test]
     fn grammar_id_nonempty() {
