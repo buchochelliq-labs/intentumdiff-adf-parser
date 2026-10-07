@@ -14,6 +14,9 @@
 
 use intentumdiff_plugin_sdk::tree::{SemanticNode, SemanticNodeBuilder};
 use serde_json::Value;
+#[cfg(test)]
+mod allocation_budget;
+mod json_spans;
 
 wit_bindgen::generate!({
     path: "wit/plugin.wit",
@@ -162,36 +165,18 @@ fn parse_variable(id: &str, name: &str, def: &Value) -> SemanticNode {
     leaf(id, "variable", &label)
 }
 
-// Borrow raw JSON values so each semantic node keeps the span of its exact
-// structural occurrence, even when labels repeat or keys contain escapes.
-fn raw_at<'a>(
-    mut raw: &'a serde_json::value::RawValue,
-    path: &[String],
-) -> Option<&'a serde_json::value::RawValue> {
-    for part in path {
-        raw = if raw.get().starts_with('[') {
-            let values: Vec<&'a serde_json::value::RawValue> =
-                serde_json::from_str(raw.get()).ok()?;
-            *values.get(part.parse::<usize>().ok()?)?
-        } else {
-            let values: std::collections::BTreeMap<String, &'a serde_json::value::RawValue> =
-                serde_json::from_str(raw.get()).ok()?;
-            *values.get(part)?
-        };
-    }
-    Some(raw)
-}
-
+// Select each structural occurrence through cached JSON containers. Parameter
+// and variable keys are indexed once in the same sorted order as semantic IDs.
 fn attach_positions(
     node: &mut SemanticNode,
-    source: &str,
-    raw: &serde_json::value::RawValue,
-    value: &Value,
+    spans: &mut json_spans::JsonSpans<'_>,
+    parameter_names: &[&str],
+    variable_names: &[&str],
 ) -> Result<(), &'static str> {
     let parts: Vec<_> = node.id.split('.').collect();
-    let mut path = Vec::<String>::new();
+    let mut path = Vec::new();
     if parts.len() > 1 {
-        path.push("properties".into());
+        path.push("properties");
         let key = match parts[1] {
             "act" => "activities",
             "param" => "parameters",
@@ -199,59 +184,41 @@ fn attach_positions(
             "ann" => "annotations",
             _ => return Err("Unknown semantic source path"),
         };
-        path.push(key.into());
-        let index = parts
-            .get(2)
-            .and_then(|s| s.parse::<usize>().ok())
-            .ok_or("Invalid semantic source index")?;
+        path.push(key);
+        let index = *parts.get(2).ok_or("Missing semantic source index")?;
         if matches!(key, "parameters" | "variables") {
-            let name = value["properties"][key]
-                .as_object()
-                .and_then(|m| m.keys().nth(index))
-                .ok_or("Missing semantic source key")?;
-            path.push(name.clone());
+            let names = if key == "parameters" {
+                parameter_names
+            } else {
+                variable_names
+            };
+            path.push(
+                *names
+                    .get(
+                        index
+                            .parse::<usize>()
+                            .map_err(|_| "Invalid semantic source index")?,
+                    )
+                    .ok_or("Missing semantic source key")?,
+            );
         } else {
-            path.push(index.to_string());
+            path.push(index);
         }
         if parts.len() > 3 {
-            path.push(
-                match parts[3] {
-                    "input" => "inputs",
-                    "output" => "outputs",
-                    "dep" => "dependsOn",
-                    _ => return Err("Unknown activity source path"),
-                }
-                .into(),
-            );
-            path.push(
-                parts
-                    .get(4)
-                    .ok_or("Missing activity source index")?
-                    .to_string(),
-            );
+            path.push(match parts[3] {
+                "input" => "inputs",
+                "output" => "outputs",
+                "dep" => "dependsOn",
+                _ => return Err("Unknown activity source path"),
+            });
+            path.push(parts.get(4).ok_or("Missing activity source index")?);
         }
     }
-    let selected = raw_at(raw, &path)
-        .ok_or("Missing semantic source span")?
-        .get();
-    let start = selected.as_ptr() as usize - source.as_ptr() as usize;
-    let end = start + selected.len();
-    let point = |offset: usize| {
-        let prefix = &source[..offset];
-        let line = prefix.bytes().filter(|&b| b == b'\n').count() as u32;
-        let col = prefix.rfind('\n').map_or(offset, |i| offset - i - 1) as u32;
-        (line, col)
-    };
-    let (start_line, start_col) = point(start);
-    let (end_line, end_col) = point(end);
-    node.position = intentumdiff_plugin_sdk::tree::Position {
-        start_line,
-        start_col,
-        end_line,
-        end_col,
-    };
+    node.position = spans
+        .position(&path)
+        .ok_or("Missing semantic source span")?;
     for child in &mut node.children {
-        attach_positions(child, source, raw, value)?;
+        attach_positions(child, spans, parameter_names, variable_names)?;
     }
     Ok(())
 }
@@ -316,11 +283,22 @@ fn parse_adf(content: &str) -> String {
         children,
     );
 
-    let raw = match serde_json::from_str::<&serde_json::value::RawValue>(content) {
-        Ok(raw) => raw,
-        Err(error) => return serde_json::json!({"error": error.to_string()}).to_string(),
+    let mut spans = match json_spans::JsonSpans::new(content) {
+        Ok(spans) => spans,
+        Err(error) => return serde_json::json!({"error": error}).to_string(),
     };
-    if let Err(error) = attach_positions(&mut root, content, raw, &val) {
+    let names = |key| {
+        val["properties"][key]
+            .as_object()
+            .map(|map| map.keys().map(String::as_str).collect::<Vec<_>>())
+            .unwrap_or_default()
+    };
+    if let Err(error) = attach_positions(
+        &mut root,
+        &mut spans,
+        &names("parameters"),
+        &names("variables"),
+    ) {
         return serde_json::json!({"error": error}).to_string();
     }
     match serde_json::to_string(&root) {
@@ -380,6 +358,30 @@ mod tests {
     use super::*;
     use crate::exports::intentdiff::plugin::parser::Guest;
     use intentumdiff_plugin_sdk::testing as t;
+
+    #[test]
+    fn large_pipeline_source_mapping_has_bounded_allocation_growth() {
+        let run = |count: usize| {
+            let activity = r#"{"name":"same","type":"Copy","inputs":[{"referenceName":"source"}],"dependsOn":[{"activity":"before"}]}"#;
+            let source = format!(
+                r#"{{"name":"pipeline","properties":{{"activities":[{}]}}}}"#,
+                vec![activity; count].join(",")
+            );
+            let (output, bytes) = allocation_budget::measure(|| parse_adf(&source));
+            let tree: Value = serde_json::from_str(&output).unwrap();
+            assert!(tree.get("error").is_none(), "{tree}");
+            assert_eq!(tree["children"].as_array().unwrap().len(), count);
+            let last = &tree["children"][count - 1];
+            let start = last["position"]["start_col"].as_u64().unwrap() as usize;
+            let end = last["position"]["end_col"].as_u64().unwrap() as usize;
+            assert_eq!(&source[start..end], activity);
+            bytes
+        };
+        let small = run(100);
+        let large = run(400);
+        eprintln!("source-map allocations: 100 activities={small}, 400 activities={large}");
+        assert!(large < small * 6, "4x activities allocated {large} vs {small} bytes; repeated collection parsing must not grow quadratically");
+    }
 
     #[test]
     fn source_ranges_distinguish_duplicate_names_and_parameter_values() {
