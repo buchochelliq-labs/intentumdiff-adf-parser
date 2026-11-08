@@ -310,3 +310,21 @@ fn mixed_activity_arrays_have_one_complete_projection() {
     assert_eq!(count_node(&output, "activity", "A (Copy)"), 0);
     assert_eq!(count_node(&output, "string", "A"), 1);
 }
+
+#[test]
+fn compound_activity_labels_cannot_hide_distinct_name_and_type() {
+    assert_payload_changes(
+        r#"{"name":"P","properties":{"activities":[{"name":"A (Copy)","type":""}]}}"#,
+        r#"{"name":"P","properties":{"activities":[{"name":"A","type":"Copy"}]}}"#,
+    );
+}
+
+#[test]
+fn compound_declaration_labels_cannot_hide_distinct_key_and_type() {
+    for collection in ["parameters", "variables"] {
+        assert_payload_changes(
+            &format!(r#"{{"name":"P","properties":{{"{collection}":{{"a : b":{{"type":"c"}}}}}}}}"#),
+            &format!(r#"{{"name":"P","properties":{{"{collection}":{{"a":{{"type":"b : c"}}}}}}}}"#),
+        );
+    }
+}

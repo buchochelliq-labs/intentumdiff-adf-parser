@@ -106,8 +106,8 @@ fn append_fields(
         let mut field_path = path.to_vec();
         field_path.push(name);
         if represented(name, value) {
-            // The domain label owns this value; retain only its key/type presence
-            // here so absent fields cannot collide with an explicit default label.
+            // The domain tree owns this value without an ambiguous compound
+            // label; retain key/type presence to distinguish absent fields.
             let kind = match value {
                 Value::String(_) => "string_field",
                 Value::Array(_) => "array_field",
@@ -230,7 +230,9 @@ pub(crate) fn append_unrepresented(
                 path,
                 fields,
                 |key, value| match key {
-                    "name" | "type" => value.is_string(),
+                    // Keep type independently: name + " (" + type + ")" is not
+                    // an injective encoding of arbitrary accepted JSON strings.
+                    "name" => value.is_string(),
                     "inputs" | "outputs" => named_references(value, "referenceName"),
                     "dependsOn" => named_references(value, "activity"),
                     _ => false,
@@ -243,7 +245,9 @@ pub(crate) fn append_unrepresented(
                 "declaration",
                 path,
                 fields,
-                |key, value| key == "type" && value.is_string(),
+                // The legacy "name : type" label likewise needs a separate
+                // typed value to preserve each accepted declaration's identity.
+                |_, _| false,
                 spans,
                 projector,
             )?,

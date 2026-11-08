@@ -18,6 +18,10 @@ order and JSON string escape spelling are not semantic differences; array order
 is preserved. Duplicate decoded keys and unsupported annotation shapes return
 an explicit error instead of a partial tree.
 
+Activity and declaration types also retain independent typed values, so different
+name/type pairs retain distinct semantic identities even when their legacy
+display labels match.
+
 Numbers retain their complete source lexemes, including close decimals and
 oversized integers. Numeric notation changes such as `1.0` versus `1e0` remain
 conservatively distinguishable; this parser does not prove their equivalence
