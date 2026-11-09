@@ -12,11 +12,15 @@
 //!   variable   — each entry in `.properties.variables`  (label = var name : type)
 //!   annotation — entries in `.properties.annotations`   (label = annotation value)
 
+use intentumdiff_plugin_sdk::config::ConfigurationProjector;
 use intentumdiff_plugin_sdk::tree::{SemanticNode, SemanticNodeBuilder};
 use serde_json::Value;
 #[cfg(test)]
 mod allocation_budget;
+mod configuration;
 mod json_spans;
+#[cfg(test)]
+mod tests_configuration;
 
 wit_bindgen::generate!({
     path: "wit/plugin.wit",
@@ -172,8 +176,11 @@ fn attach_positions(
     spans: &mut json_spans::JsonSpans<'_>,
     parameter_names: &[&str],
     variable_names: &[&str],
+    value: &Value,
+    projector: &ConfigurationProjector<'_>,
 ) -> Result<(), &'static str> {
-    let parts: Vec<_> = node.id.split('.').collect();
+    let semantic_id = node.id.clone();
+    let parts: Vec<_> = semantic_id.split('.').collect();
     let mut path = Vec::new();
     if parts.len() > 1 {
         path.push("properties");
@@ -218,8 +225,16 @@ fn attach_positions(
         .position(&path)
         .ok_or("Missing semantic source span")?;
     for child in &mut node.children {
-        attach_positions(child, spans, parameter_names, variable_names)?;
+        attach_positions(
+            child,
+            spans,
+            parameter_names,
+            variable_names,
+            value,
+            projector,
+        )?;
     }
+    configuration::append_unrepresented(node, &path, value, spans, projector)?;
     Ok(())
 }
 
@@ -293,11 +308,14 @@ fn parse_adf(content: &str) -> String {
             .map(|map| map.keys().map(String::as_str).collect::<Vec<_>>())
             .unwrap_or_default()
     };
+    let projector = ConfigurationProjector::new(content);
     if let Err(error) = attach_positions(
         &mut root,
         &mut spans,
         &names("parameters"),
         &names("variables"),
+        &val,
+        &projector,
     ) {
         return serde_json::json!({"error": error}).to_string();
     }
@@ -362,7 +380,7 @@ mod tests {
     #[test]
     fn large_pipeline_source_mapping_has_bounded_allocation_growth() {
         let run = |count: usize| {
-            let activity = r#"{"name":"same","type":"Copy","inputs":[{"referenceName":"source"}],"dependsOn":[{"activity":"before"}]}"#;
+            let activity = r#"{"name":"same","type":"Copy","inputs":[{"referenceName":"source"}],"dependsOn":[{"activity":"before"}],"policy":{"retry":1}}"#;
             let source = format!(
                 r#"{{"name":"pipeline","properties":{{"activities":[{}]}}}}"#,
                 vec![activity; count].join(",")
@@ -370,8 +388,14 @@ mod tests {
             let (output, bytes) = allocation_budget::measure(|| parse_adf(&source));
             let tree: Value = serde_json::from_str(&output).unwrap();
             assert!(tree.get("error").is_none(), "{tree}");
-            assert_eq!(tree["children"].as_array().unwrap().len(), count);
-            let last = &tree["children"][count - 1];
+            let activities: Vec<_> = tree["children"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|node| node["node_type"] == "activity")
+                .collect();
+            assert_eq!(activities.len(), count);
+            let last = activities[count - 1];
             let start = last["position"]["start_col"].as_u64().unwrap() as usize;
             let end = last["position"]["end_col"].as_u64().unwrap() as usize;
             assert_eq!(&source[start..end], activity);
