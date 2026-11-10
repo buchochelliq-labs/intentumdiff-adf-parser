@@ -21,6 +21,8 @@ mod configuration;
 mod json_spans;
 #[cfg(test)]
 mod tests_configuration;
+#[cfg(test)]
+mod tests_issue7;
 
 wit_bindgen::generate!({
     path: "wit/plugin.wit",
@@ -238,14 +240,20 @@ fn attach_positions(
     Ok(())
 }
 
+/// The SDK's in-band failure envelope. Messages are JSON-escaped so a decoder
+/// message containing quotes or backslashes cannot yield an invalid envelope.
+fn error_envelope(message: &str) -> String {
+    serde_json::json!({ "error": message }).to_string()
+}
+
 fn parse_adf(content: &str) -> String {
     let val: Value = match serde_json::from_str(content) {
         Ok(v) => v,
-        Err(e) => return format!(r#"{{"error":"JSON parse failed: {}"}}"#, e),
+        Err(e) => return error_envelope(&format!("JSON parse failed: {e}")),
     };
     let root_map = match val.as_object() {
         Some(m) => m,
-        None => return r#"{"error":"Not a JSON object"}"#.to_string(),
+        None => return error_envelope("Not a JSON object"),
     };
 
     let pipeline_name = str_field(root_map, "name");
@@ -300,7 +308,7 @@ fn parse_adf(content: &str) -> String {
 
     let mut spans = match json_spans::JsonSpans::new(content) {
         Ok(spans) => spans,
-        Err(error) => return serde_json::json!({"error": error}).to_string(),
+        Err(error) => return error_envelope(&error),
     };
     let names = |key| {
         val["properties"][key]
@@ -317,11 +325,11 @@ fn parse_adf(content: &str) -> String {
         &val,
         &projector,
     ) {
-        return serde_json::json!({"error": error}).to_string();
+        return error_envelope(error);
     }
     match serde_json::to_string(&root) {
         Ok(s) => s,
-        Err(e) => format!(r#"{{"error":"Serialisation error: {}"}}"#, e),
+        Err(e) => error_envelope(&format!("Serialisation error: {e}")),
     }
 }
 
