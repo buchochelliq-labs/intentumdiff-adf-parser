@@ -10,13 +10,13 @@ publish = false
 crate-type = ["cdylib"]
 
 [dependencies]
-intentumdiff-plugin-sdk = { git = "https://github.com/buchochelliq-labs/intentumdiff-plugin-sdk", rev = "db4de224118e5ccbeacc08e80ff0361701d48c8a" }
+intentumdiff-plugin-sdk = { git = "https://github.com/buchochelliq-labs/intentumdiff-plugin-sdk", rev = "fafe9b5dec89e8d6d8dd2702047f44996021c841" }
 serde_json = { version = "1", features = ["raw_value"] }
 serde = "1"
 wit-bindgen = { version = "0.57", default-features = false, features = ["std", "macros"] }
 
 [dev-dependencies]
-intentumdiff-plugin-sdk = { git = "https://github.com/buchochelliq-labs/intentumdiff-plugin-sdk", rev = "db4de224118e5ccbeacc08e80ff0361701d48c8a", features = ["testing"] }
+intentumdiff-plugin-sdk = { git = "https://github.com/buchochelliq-labs/intentumdiff-plugin-sdk", rev = "fafe9b5dec89e8d6d8dd2702047f44996021c841", features = ["testing"] }
 
 # Plugins target WASI p2 (Component Model); mirrors the monorepo's certified build profile.
 [profile.release]

@@ -162,7 +162,8 @@ fn payload_scalars_have_exact_utf8_source_spans_and_unique_ids() {
     for (kind, label, token) in [
         ("string", "μ", "\"μ\""),
         ("string", "😀", "\"😀\""),
-        ("number", "18446744073709551617", "18446744073709551617"),
+        // plugin-sdk#31: exact canonical decimal label, original token span.
+        ("number", "18446744073709551617e0", "18446744073709551617"),
         ("boolean", "false", "false"),
         ("null", "null", "null"),
     ] {
@@ -326,5 +327,40 @@ fn compound_declaration_labels_cannot_hide_distinct_key_and_type() {
             &format!(r#"{{"name":"P","properties":{{"{collection}":{{"a : b":{{"type":"c"}}}}}}}}"#),
             &format!(r#"{{"name":"P","properties":{{"{collection}":{{"a":{{"type":"b : c"}}}}}}}}"#),
         );
+    }
+}
+
+/// Regression witness for plugin-sdk#31: equivalent exact JSON decimal spellings
+/// of a configuration number are one value, while real numeric edits, sign,
+/// precision beyond f64 and string/number type changes stay visible.
+#[test]
+fn equivalent_exact_decimal_spellings_are_preserved_and_real_numeric_edits_remain() {
+    let pipeline = |retry: &str, timeout: &str| {
+        format!(
+            r#"{{"name":"P","properties":{{"parameters":{{"ratio":{{"type":"float","defaultValue":{timeout}}}}},"activities":[{{"name":"A","type":"WebActivity","policy":{{"retry":{retry}}}}}]}}}}"#
+        )
+    };
+    for (old, new) in [
+        (("3", "1.0"), ("3", "1e0")),
+        (("3", "0.0100"), ("3", "1e-2")),
+        (("3", "-12.50"), ("3", "-125e-1")),
+        (("1000", "1"), ("1e3", "1")),
+        (("0", "1"), ("-0.000e9", "1")),
+    ] {
+        assert_eq!(
+            tree(&pipeline(old.0, old.1))["structural_hash"],
+            tree(&pipeline(new.0, new.1))["structural_hash"],
+            "{old:?} vs {new:?} spell the same exact decimal value"
+        );
+    }
+    for (old, new) in [
+        (("3", "1.0"), ("3", "1.5")),
+        (("3", "1"), ("3", "-1")),
+        (("3", "1.00000000000000001"), ("3", "1.00000000000000002")),
+        (("3", "1e+2"), ("3", "1e-2")),
+        (("3", "1"), ("3", r#""1""#)),
+        (("0", "1"), ("3", "1")),
+    ] {
+        assert_payload_changes(&pipeline(old.0, old.1), &pipeline(new.0, new.1));
     }
 }
