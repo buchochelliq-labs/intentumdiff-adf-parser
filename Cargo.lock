@@ -131,8 +131,8 @@ dependencies = [
 
 [[package]]
 name = "intentumdiff-plugin-sdk"
-version = "0.1.0"
-source = "git+https://github.com/buchochelliq-labs/intentumdiff-plugin-sdk?rev=fafe9b5dec89e8d6d8dd2702047f44996021c841#fafe9b5dec89e8d6d8dd2702047f44996021c841"
+version = "0.0.3-beta.1"
+source = "git+https://github.com/buchochelliq-labs/intentumdiff-plugin-sdk?rev=01badeabebfdbb61fb3951f836ccf24d2ad98b06#01badeabebfdbb61fb3951f836ccf24d2ad98b06"
 dependencies = [
  "hex",
  "serde",

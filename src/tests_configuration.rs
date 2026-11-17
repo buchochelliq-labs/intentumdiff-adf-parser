@@ -162,8 +162,8 @@ fn payload_scalars_have_exact_utf8_source_spans_and_unique_ids() {
     for (kind, label, token) in [
         ("string", "μ", "\"μ\""),
         ("string", "😀", "\"😀\""),
-        // plugin-sdk#31: exact canonical decimal label, original token span.
-        ("number", "18446744073709551617e0", "18446744073709551617"),
+        // Numbers display as written; canonical decimals are hash-only.
+        ("number", "18446744073709551617", "18446744073709551617"),
         ("boolean", "false", "false"),
         ("null", "null", "null"),
     ] {
@@ -352,6 +352,14 @@ fn equivalent_exact_decimal_spellings_are_preserved_and_real_numeric_edits_remai
             tree(&pipeline(new.0, new.1))["structural_hash"],
             "{old:?} vs {new:?} spell the same exact decimal value"
         );
+        // Canonical decimals are identity-only: every number displays as written.
+        for (retry, timeout) in [old, new] {
+            let labels = number_labels(&tree(&pipeline(retry, timeout)));
+            for token in [retry, timeout] {
+                assert!(labels.iter().any(|l| l == token), "{token} not in {labels:?}");
+            }
+            assert!(labels.iter().all(|l| l == retry || l == timeout), "{labels:?}");
+        }
     }
     for (old, new) in [
         (("3", "1.0"), ("3", "1.5")),
@@ -363,4 +371,15 @@ fn equivalent_exact_decimal_spellings_are_preserved_and_real_numeric_edits_remai
     ] {
         assert_payload_changes(&pipeline(old.0, old.1), &pipeline(new.0, new.1));
     }
+}
+
+fn number_labels(node: &Value) -> Vec<String> {
+    let mut out = Vec::new();
+    if node["node_type"] == "number" {
+        out.push(node["label"].as_str().unwrap().to_owned());
+    }
+    for child in node["children"].as_array().into_iter().flatten() {
+        out.extend(number_labels(child));
+    }
+    out
 }

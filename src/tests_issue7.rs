@@ -80,10 +80,8 @@ const EDITS: [Edit; 5] = [
         old_token: "0",
         new_token: "9",
         kind: "number",
-        // plugin-sdk#31: number labels are the exact canonical decimal
-        // (`digits e exponent`, zero as `0`); the span still anchors the token.
         old_label: "0",
-        new_label: "9e0",
+        new_label: "9",
     },
     Edit {
         case: "adf_dependency_condition",
